@@ -7,8 +7,8 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const BOT_SECRET = process.env.BOT_SECRET || "rainx-bot-secret";
-const SIGN_SECRET = process.env.SIGN_SECRET || "rainx-sign-secret-xyz";
+const BOT_SECRET = process.env.BOT_SECRET || "mystic-secret-123";
+const SIGN_SECRET = process.env.SIGN_SECRET || "mystic-sign-secret-xyz";
 const DATA_FILE = path.join(__dirname, "data.json");
 
 // ====== IN-MEMORY CACHE ======
@@ -35,13 +35,9 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify({ keys: _keys, config: _config }, null, 2));
 }
 
-// auto-save ทุก 5 วิ ถ้ามีการเปลี่ยนแปลง
 setInterval(() => { if (_dirty) saveData(); }, 5000);
-
-// โหลดตอนเริ่ม
 loadData();
 
-// index userId -> key สำหรับ lookup เร็ว
 const userIndex = new Map();
 for (const [k, v] of Object.entries(_keys)) {
     if (v.usedBy) userIndex.set(v.usedBy, k);
@@ -52,7 +48,7 @@ const sessions = new Map();
 const usedSessions = new Set();
 const rateLimitMap = new Map();
 const activeTokens = new Map();
-const scriptTokens = new Map(); // one-time script tokens: token -> { userId, key, expireAt }
+const scriptTokens = new Map();
 
 setInterval(() => {
     const now = Date.now();
@@ -139,13 +135,12 @@ app.post("/cdn-cgi/challenge", guard, (req, res) => {
 
     const sessionId = crypto.randomBytes(16).toString("hex");
     const sessionKey = crypto.randomBytes(32).toString("hex");
-
     const clientIp = req.headers["x-forwarded-for"]?.split(",")[0].trim() || req.ip;
     const hashedHwidChallenge = crypto.createHash("sha256").update(hwid).digest("hex");
 
     sessions.set(sessionId, {
         sessionKey, key,
-        hwid: hashedHwidChallenge, // เก็บ hashed ไม่เก็บ raw
+        hwid: hashedHwidChallenge,
         nonce, fp,
         ip: clientIp,
         expireAt: Date.now() + 15000
@@ -166,7 +161,6 @@ app.post("/cdn-cgi/token", guard, (req, res) => {
     const reqIp = req.headers["x-forwarded-for"]?.split(",")[0].trim() || req.ip;
     const hashedHwidToken = crypto.createHash("sha256").update(hwid).digest("hex");
 
-    // เช็ค IP ต้องตรงกับตอน challenge + hwid hashed ต้องตรง
     if (entry.hwid !== hashedHwidToken || entry.nonce !== nonce || entry.fp !== fp || entry.ip !== reqIp)
         return res.json({ e: "bad" });
 
@@ -182,7 +176,6 @@ app.post("/cdn-cgi/token", guard, (req, res) => {
         return res.json({ e: "exp" });
     }
 
-    // ใช้ hashedHwidToken ที่คำนวณไว้แล้วด้านบน ไม่ต้อง hash ซ้ำ
     if (keyData.hwid && keyData.hwid !== "" && keyData.hwid !== hashedHwidToken)
         return res.json({ e: "hwid" });
 
@@ -200,17 +193,9 @@ app.post("/cdn-cgi/token", guard, (req, res) => {
         expireAt: Date.now() + 5 * 60 * 1000
     });
 
-    // สร้าง one-time script token
-    const scriptToken = crypto.randomBytes(32).toString("hex");
-    scriptTokens.set(scriptToken, {
-        userId: keyData.usedBy,
-        key: entry.key,
-        expireAt: Date.now() + 60000 // หมดใน 60 วิ
-    });
-
+    // ส่ง activeToken กลับแบบเดิม ตรงกับ ClientLoader
     const payload = {
         ok: true,
-        scriptToken, // ใช้แทน scriptUrl โดยตรง
         activeToken,
         ts: nowSec()
     };
@@ -274,7 +259,6 @@ app.post("/keys/:key/reset-hwid", botAuth, (req, res) => {
     res.json({ ok: true });
 });
 
-// lookup เร็วด้วย userIndex
 app.get("/keys/user/:userId", botAuth, (req, res) => {
     const key = userIndex.get(req.params.userId);
     if (!key || !_keys[key]) return res.status(404).json({ ok: false });
@@ -311,31 +295,23 @@ app.get("/config", botAuth, (req, res) => {
     res.json({ ok: true, config: _config });
 });
 
-// one-time script endpoint
 app.get("/cdn-cgi/resource", (req, res) => {
     const { t } = req.query;
     if (!t) return res.status(403).send("forbidden");
-
     const entry = scriptTokens.get(t);
     if (!entry) return res.status(403).send("forbidden");
     if (Date.now() > entry.expireAt) {
         scriptTokens.delete(t);
         return res.status(403).send("expired");
     }
-
-    // ใช้แล้วลบทันที one-time only
     scriptTokens.delete(t);
-
     const scriptUrl = _config.scriptUrl;
     if (!scriptUrl) return res.status(404).send("no script");
-
-    // ฝัง watermark - ถ้าเอาไปแจกรู้ทันทีว่าใคร
     const watermark = `-- [RainX] Licensed to: ${entry.userId} | Key: ${entry.key.slice(0,8)}...
 -- Redistribution is prohibited.
 getgenv().key = "${entry.key}"
 getgenv()._owner = "${entry.userId}"
 loadstring(game:HttpGet("${scriptUrl}"))()`;
-
     res.setHeader("Content-Type", "text/plain");
     res.send(watermark);
 });
